@@ -2,9 +2,11 @@
 #
 # Usage:
 #   .\hiclaw-import.ps1 -Zip <path-or-url> [options]
+#   .\hiclaw-import.ps1 -Nacos <nacos-uri> [-Name <worker>] [-Yes]
 
 param(
     [string]$Zip = $env:HICLAW_IMPORT_ZIP,
+    [string]$Nacos = "",
     [string]$Name = $env:HICLAW_IMPORT_WORKER_NAME,
     [string]$Proxy = $env:HICLAW_IMPORT_PROXY,
     [string]$NoProxy = $env:HICLAW_IMPORT_NO_PROXY,
@@ -23,6 +25,19 @@ $ErrorActionPreference = "Stop"
 function Write-Log { param([string]$Msg); Write-Host "[HiClaw Import] $Msg" -ForegroundColor Cyan }
 function Write-Warn { param([string]$Msg); Write-Host "[HiClaw Import WARNING] $Msg" -ForegroundColor Yellow }
 function Write-Err { param([string]$Msg); Write-Host "[HiClaw Import ERROR] $Msg" -ForegroundColor Red; exit 1 }
+
+function Normalize-WorkerName {
+    param([string]$Input)
+    # Lowercase
+    $result = $Input.ToLower()
+    # Remove characters that are not alphanumeric or hyphens
+    $result = $result -replace "[^a-z0-9-]", ""
+    # Trim leading hyphens
+    $result = $result -replace "^-+", ""
+    # Trim trailing hyphens
+    $result = $result -replace "-+$", ""
+    return $result
+}
 
 function New-RandomHex {
     param([int]$Bytes = 32)
@@ -101,13 +116,115 @@ function Get-Msg {
 # Validate arguments
 # ============================================================
 
-if (-not $Zip) {
+# Mutual exclusivity: -Nacos and -Zip cannot both be provided
+if ($Nacos -and $Zip) {
+    Write-Err "-Nacos and -Zip are mutually exclusive; provide one or the other"
+}
+
+if (-not $Zip -and -not $Nacos) {
     Write-Host "Usage: .\hiclaw-import.ps1 -Zip <path-or-url> [-Name <worker>] [-Proxy <url>] [-EnvFile <path>] [-SkipBuild] [-Yes]"
+    Write-Host "       .\hiclaw-import.ps1 -Nacos <nacos-uri> [-Name <worker>] [-Yes]"
+    Write-Host ""
+    Write-Host "Nacos URI format: nacos://{instance-id}/{namespace}/{agentspec-name}[/{version}]"
+    Write-Host "  Requires HICLAW_NACOS_ADDR environment variable (format: [user:pass@]host:port)"
     exit 1
 }
 
 if (-not $EnvFile) { $EnvFile = Join-Path $HOME "hiclaw-manager.env" }
 $AutoYes = $Yes -or ($env:HICLAW_NON_INTERACTIVE -eq "1")
+
+# ============================================================
+# Nacos import flow
+# ============================================================
+
+if ($Nacos) {
+    # Validate nacos:// URI prefix
+    if (-not $Nacos.StartsWith("nacos://")) {
+        Write-Err "Invalid nacos URI: must start with nacos:// (expected format: nacos://{instance-id}/{namespace}/{agentspec-name}[/{version}])"
+    }
+
+    # Extract worker name from URI if -Name was not provided
+    if (-not $Name) {
+        # URI path after nacos://{host} is /{namespace}/{agentspec-name}[/{version}]
+        # Strip scheme+host to get the path, then extract the 2nd path segment (agentspec-name)
+        $uriPath = $Nacos -replace "^nacos://", ""   # remove scheme
+        $uriPath = $uriPath -replace "^[^/]*/", ""   # remove host → namespace/agentspec[/version]
+        $uriPath = $uriPath -replace "^[^/]*/", ""   # remove namespace → agentspec[/version]
+        $Name = ($uriPath -split "/")[0]              # remove /version if present
+    }
+
+    # Normalize worker name
+    $Name = Normalize-WorkerName -Input $Name
+
+    if (-not $Name) {
+        Write-Err "Could not derive a valid worker name from the nacos URI or -Name argument"
+    }
+
+    # Verify HICLAW_NACOS_ADDR is set
+    if (-not $env:HICLAW_NACOS_ADDR) {
+        Write-Err "HICLAW_NACOS_ADDR environment variable is required for nacos:// imports (format: [user:pass@]host:port)"
+    }
+
+    # Generate Worker YAML to temp file
+    $NacosTmpYaml = [System.IO.Path]::GetTempFileName()
+    try {
+        $yamlContent = @"
+apiVersion: hiclaw.io/v1
+kind: Worker
+metadata:
+  name: $Name
+spec:
+  package: $Nacos
+"@
+        [System.IO.File]::WriteAllText($NacosTmpYaml, $yamlContent)
+
+        # Display import summary
+        Write-Host ""
+        Write-Host "[HiClaw Import] Nacos Import Summary"
+        Write-Host "  Nacos URI:    $Nacos"
+        Write-Host "  Worker name:  $Name"
+        Write-Host ""
+
+        # Prompt for confirmation unless -Yes is set
+        if (-not $AutoYes) {
+            $confirm = Read-Host "Proceed with import? [y/N]"
+            if ($confirm -notmatch "^[yY]") {
+                Write-Host "Import cancelled."
+                exit 0
+            }
+        }
+
+        # Detect container runtime
+        $script:ContainerCmd = ""
+        try { $null = & docker info 2>$null; $script:ContainerCmd = "docker" } catch {}
+        if (-not $script:ContainerCmd) {
+            try { $null = & podman info 2>$null; $script:ContainerCmd = "podman" } catch {}
+        }
+        if (-not $script:ContainerCmd) { Write-Err (Get-Msg "preflight.runtime.none") }
+
+        # Verify Manager container
+        $mgrRunning = & $script:ContainerCmd ps --filter "name=hiclaw-manager" --format "{{.Names}}" 2>$null
+        if ($mgrRunning -notmatch "hiclaw-manager") { Write-Err (Get-Msg "preflight.manager.down") }
+
+        # Copy YAML into container at /tmp/import/
+        $yamlBasename = [System.IO.Path]::GetFileName($NacosTmpYaml)
+        & $script:ContainerCmd exec hiclaw-manager mkdir -p /tmp/import 2>$null
+        & $script:ContainerCmd cp $NacosTmpYaml "hiclaw-manager:/tmp/import/$yamlBasename"
+        Write-Log "Copied $yamlBasename -> container:/tmp/import/"
+
+        # Delegate to hiclaw apply -f inside container with HICLAW_NACOS_ADDR env passthrough
+        $hiclawArgs = @("exec", "-e", "HICLAW_NACOS_ADDR=$($env:HICLAW_NACOS_ADDR)", "hiclaw-manager", "hiclaw", "apply", "-f", "/tmp/import/$yamlBasename")
+        if ($AutoYes) {
+            $hiclawArgs += "--yes"
+        }
+        & $script:ContainerCmd @hiclawArgs
+        $nacosExitCode = $LASTEXITCODE
+        exit $nacosExitCode
+    } finally {
+        # Cleanup temp file
+        if (Test-Path $NacosTmpYaml) { Remove-Item $NacosTmpYaml -Force -ErrorAction SilentlyContinue }
+    }
+}
 
 # Download ZIP if URL provided
 $DownloadedZip = ""
