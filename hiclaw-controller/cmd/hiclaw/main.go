@@ -365,8 +365,8 @@ func loadResources(files []string) ([]resource, error) {
 				if strings.HasPrefix(line, "kind:") {
 					r.Kind = strings.TrimSpace(strings.TrimPrefix(line, "kind:"))
 				}
-				if strings.HasPrefix(line, "  name:") && r.Name == "" {
-					r.Name = strings.TrimSpace(strings.TrimPrefix(line, "  name:"))
+				if strings.HasPrefix(line, "name:") && r.Name == "" {
+					r.Name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
 				}
 			}
 
