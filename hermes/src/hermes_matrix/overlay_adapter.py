@@ -23,6 +23,7 @@ from gateway.config import PlatformConfig
 from gateway.platforms._matrix_native import MatrixAdapter as _NativeMatrixAdapter
 
 from hermes_matrix.policies import (
+    DenyNotifier,
     DualAllowList,
     HistoryBuffer,
     apply_outbound_mentions,
@@ -98,6 +99,7 @@ class MatrixAdapter(_NativeMatrixAdapter):
         super().__init__(config)
         self._dual_allow = DualAllowList.from_env()
         self._history = HistoryBuffer.from_env()
+        self._deny_notifier = DenyNotifier.from_env()
         self._vision_enabled = _truthy_env("MATRIX_VISION_ENABLED", default=False)
 
     async def connect(self) -> bool:
@@ -143,6 +145,28 @@ class MatrixAdapter(_NativeMatrixAdapter):
         """Apply HiClaw allow/history policy around native mention gating."""
         is_dm = await self._is_dm_room(room_id)
         if not self._dual_allow.permits(sender, is_dm=is_dm):
+            # Check for thread events
+            rel_type = (relates_to or {}).get("rel_type", "")
+            is_thread = rel_type == "m.thread"
+            should_send, deny_msg = self._deny_notifier.should_notify(
+                sender, room_id, is_dm, is_thread,
+            )
+            if should_send and self._client is not None:
+                try:
+                    await self._client.send_message_event(
+                        room_id,
+                        "m.room.message",
+                        {"msgtype": "m.text", "body": deny_msg},
+                    )
+                    logger.info(
+                        "Matrix: sent deny notification to %s in %s",
+                        sender, room_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Matrix: failed to send deny notification to %s in %s: %s",
+                        sender, room_id, exc,
+                    )
             return None
 
         ctx = await super()._resolve_message_context(

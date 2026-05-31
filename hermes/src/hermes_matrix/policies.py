@@ -220,3 +220,51 @@ class HistoryBuffer:
 
     def clear(self, room_id: str) -> None:
         self._entries.pop(room_id, None)
+
+
+_DEFAULT_DENY_MESSAGE = (
+    "\u26a0\ufe0f Sorry, I am not authorized to respond in this room. "
+    "Please contact the admin to request access.\n"
+    "\u26a0\ufe0f \u62b1\u6b49\uff0c\u6211\u672a\u88ab\u6388\u6743\u5728\u6b64\u623f\u95f4\u56de\u590d\u6d88\u606f\u3002"
+    "\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u7533\u8bf7\u6743\u9650\u3002"
+)
+
+
+@dataclass
+class DenyNotifier:
+    """Rate-limited deny notification for group rooms."""
+
+    message: str = ""
+    cooldown_s: float = 3600.0
+    _cache: Dict[tuple, float] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "DenyNotifier":
+        msg = os.getenv("MATRIX_DENY_MESSAGE", "")
+        raw_cd = os.getenv("MATRIX_DENY_COOLDOWN_S", "")
+        try:
+            cooldown = float(raw_cd) if raw_cd else 3600.0
+        except ValueError:
+            cooldown = 3600.0
+        return cls(message=msg, cooldown_s=cooldown)
+
+    def should_notify(
+        self,
+        sender: str,
+        room_id: str,
+        is_dm: bool,
+        is_thread: bool,
+    ) -> tuple:
+        """Return (should_send: bool, message: str)."""
+        if is_dm or is_thread:
+            return (False, "")
+        import time
+        now = time.time()
+        normalized = normalize_user_id(sender)
+        cache_key = (room_id, normalized)
+        last_ts = self._cache.get(cache_key, 0.0)
+        if now - last_ts < self.cooldown_s:
+            return (False, "")
+        self._cache[cache_key] = now
+        msg = self.message or _DEFAULT_DENY_MESSAGE
+        return (True, msg)

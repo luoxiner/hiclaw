@@ -73,6 +73,14 @@ TYPING_SERVER_TIMEOUT_MS = 30000
 TYPING_RENEWAL_INTERVAL_S = 25
 TYPING_MAX_DURATION_S = 120
 DM_CACHE_TTL_MS = 30_000
+DENY_NOTIFY_COOLDOWN_S = 3600  # 1h cooldown per user+room
+
+_DEFAULT_DENY_MESSAGE = (
+    "\u26a0\ufe0f Sorry, I am not authorized to respond in this room. "
+    "Please contact the admin to request access.\n"
+    "\u26a0\ufe0f \u62b1\u6b49\uff0c\u6211\u672a\u88ab\u6388\u6743\u5728\u6b64\u623f\u95f4\u56de\u590d\u6d88\u606f\u3002"
+    "\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u7533\u8bf7\u6743\u9650\u3002"
+)
 
 # Known QwenPaw slash commands — used to decide whether to strip
 # @mention prefix
@@ -272,6 +280,7 @@ class MatrixChannelConfig:
         )
         # matrix-nio sync long-poll timeout (ms); typical 30s
         self.sync_timeout_ms: int = raw.get("sync_timeout_ms", 30000)
+        self.deny_message: str = raw.get("deny_message", "")
 
 
 def _normalize_user_id(uid: str) -> str:
@@ -319,6 +328,8 @@ class MatrixChannel(BaseChannel):
         # DM room cache: room_id -> {"members": [user_ids], "ts": timestamp}
         # Used to reliably detect DM rooms when nio's room.users is unreliable.
         self._dm_room_cache: Dict[str, Dict[str, Any]] = {}
+        # Deny notification rate-limit cache: (room_id, sender) -> timestamp
+        self._deny_notify_cache: Dict[tuple, float] = {}
         # Shared HTTP client for media downloads (created in start())
         self._http_client: Optional[httpx.AsyncClient] = None
 
@@ -798,6 +809,38 @@ class MatrixChannel(BaseChannel):
                     )
                     return False
         return True
+
+    async def _notify_denied(
+        self,
+        sender_id: str,
+        room_id: str,
+        is_dm: bool,
+        is_thread: bool,
+    ) -> None:
+        """Send a one-time friendly notification when a message is denied."""
+        if is_dm or is_thread:
+            return
+        import time
+        now = time.time()
+        normalized = _normalize_user_id(sender_id)
+        cache_key = (room_id, normalized)
+        last_ts = self._deny_notify_cache.get(cache_key, 0.0)
+        if now - last_ts < DENY_NOTIFY_COOLDOWN_S:
+            return
+        # Update cache BEFORE sending to prevent retry storms
+        self._deny_notify_cache[cache_key] = now
+        msg = self._cfg.deny_message or _DEFAULT_DENY_MESSAGE
+        try:
+            await self._send_plain_text(room_id, msg)
+            logger.info(
+                "MatrixChannel: sent deny notification to %s in %s",
+                sender_id, room_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "MatrixChannel: failed to send deny notification to %s in %s: %s",
+                sender_id, room_id, exc,
+            )
 
     def _require_mention(self, room_id: str) -> bool:
         """Per-room config; default is require mention in group rooms."""
@@ -1350,6 +1393,8 @@ class MatrixChannel(BaseChannel):
         is_dm = await self._is_dm_room(room_id, sender_id)
 
         if not self._check_allowed(sender_id, room_id, is_dm):
+            is_thread_event = self._is_thread_event(event)
+            await self._notify_denied(sender_id, room_id, is_dm, is_thread_event)
             return
 
         is_thread_event = self._is_thread_event(event)
@@ -1685,6 +1730,8 @@ class MatrixChannel(BaseChannel):
         )
 
         if not self._check_allowed(sender_id, room_id, is_dm):
+            is_thread_event = self._is_thread_event(event)
+            await self._notify_denied(sender_id, room_id, is_dm, is_thread_event)
             return
 
         is_thread_event = self._is_thread_event(event)
@@ -1826,6 +1873,8 @@ class MatrixChannel(BaseChannel):
         is_dm = await self._is_dm_room(room_id, sender_id)
 
         if not self._check_allowed(sender_id, room_id, is_dm):
+            is_thread_event = self._is_thread_event(event)
+            await self._notify_denied(sender_id, room_id, is_dm, is_thread_event)
             return
 
         is_thread_event = self._is_thread_event(event)
