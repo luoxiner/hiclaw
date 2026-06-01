@@ -406,15 +406,28 @@ class Worker:
         # 1. Seed CoPaw built-in skills as base layer.
         # bridge.py has already patched copaw.constant.ACTIVE_SKILLS_DIR to point
         # here, so sync_skills_to_working_dir() writes to the correct directory.
+        # NOTE: sync_skills_to_working_dir is only available in lite-copaw (GitHub
+        # fork). The standard PyPI copaw package does not ship this function, so we
+        # guard the import to avoid periodic WARNING noise (see #774).
         try:
-            from copaw.agents.skills_manager import sync_skills_to_working_dir
-            synced, skipped = sync_skills_to_working_dir(skill_names=None, force=False)
-            logger.info(
-                "Seeded CoPaw built-in skills: %d installed, %d already existed",
-                synced, skipped,
+            from copaw.agents import skills_manager as _sm
+            _sync_fn = getattr(_sm, "sync_skills_to_working_dir", None)
+            if _sync_fn is not None:
+                synced, skipped = _sync_fn(skill_names=None, force=False)
+                logger.info(
+                    "Seeded CoPaw built-in skills: %d installed, %d already existed",
+                    synced, skipped,
+                )
+            else:
+                logger.debug(
+                    "copaw.agents.skills_manager.sync_skills_to_working_dir not available; "
+                    "built-in skills will be loaded by CoPaw runtime directly"
+                )
+        except ImportError:
+            logger.debug(
+                "copaw.agents.skills_manager not available; "
+                "built-in skills will be loaded by CoPaw runtime directly"
             )
-        except Exception as exc:
-            logger.warning("Failed to seed CoPaw built-in skills: %s", exc)
 
         # 2. Overlay with Manager-pushed skills from MinIO (higher priority).
         skill_names = self.sync.list_skills()
