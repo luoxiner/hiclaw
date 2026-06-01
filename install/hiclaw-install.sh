@@ -364,8 +364,14 @@ msg() {
         "llm.provider.alibaba.en") text="  1) Alibaba Cloud CodingPlan  - Optimized for coding tasks (recommended)" ;;
         "llm.provider.openai_compat.zh") text="  2) OpenAI 兼容 API  - 自定义 Base URL（OpenAI、DeepSeek 等）" ;;
         "llm.provider.openai_compat.en") text="  2) OpenAI-compatible API  - Custom Base URL (OpenAI, DeepSeek, etc.)" ;;
-        "llm.provider.select.zh") text="选择提供商 [1/2]" ;;
-        "llm.provider.select.en") text="Select provider [1/2]" ;;
+        "llm.provider.anthropic.zh") text="  3) Anthropic (Claude)  - Claude Sonnet / Opus / Haiku" ;;
+        "llm.provider.anthropic.en") text="  3) Anthropic (Claude)  - Claude Sonnet / Opus / Haiku" ;;
+        "llm.provider.selected_anthropic.zh") text="  \u63d0\u4f9b\u5546: Anthropic (Claude)" ;;
+        "llm.provider.selected_anthropic.en") text="  Provider: Anthropic (Claude)" ;;
+        "llm.anthropic.model_prompt.zh") text="\u9ed8\u8ba4\u6a21\u578b ID [claude-sonnet-4-6]" ;;
+        "llm.anthropic.model_prompt.en") text="Default Model ID [claude-sonnet-4-6]" ;;
+        "llm.provider.select.zh") text="选择提供商 [1/2/3]" ;;
+        "llm.provider.select.en") text="Select provider [1/2/3]" ;;
         "llm.alibaba.models_title.zh") text="选择百炼模型系列:" ;;
         "llm.alibaba.models_title.en") text="Select Bailian model series:" ;;
         "llm.alibaba.model.codingplan.zh") text="  1) CodingPlan  - 专为编程任务优化（推荐）" ;;
@@ -1504,6 +1510,7 @@ step_llm() {
     echo "$(msg llm.providers_title)"
     echo "$(msg llm.provider.alibaba)"
     echo "$(msg llm.provider.openai_compat)"
+    echo "$(msg llm.provider.anthropic)"
     echo ""
     local PROVIDER_CHOICE
     if [ "${HICLAW_QUICKSTART}" = "1" ]; then
@@ -1629,6 +1636,19 @@ step_llm() {
             log ""
             prompt HICLAW_LLM_API_KEY "$(msg llm.apikey_prompt)" "" "true" || return 0
             test_llm_connectivity "${HICLAW_OPENAI_BASE_URL}" "${HICLAW_LLM_API_KEY}" "${HICLAW_DEFAULT_MODEL}" || return 0
+            ;;
+        3|anthropic)
+            HICLAW_LLM_PROVIDER="anthropic"
+            log "$(msg llm.provider.selected_anthropic)"
+            echo ""
+            read -e -p "$(msg llm.anthropic.model_prompt): " HICLAW_DEFAULT_MODEL
+            if [ "${HICLAW_DEFAULT_MODEL}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+            HICLAW_DEFAULT_MODEL="${HICLAW_DEFAULT_MODEL:-claude-sonnet-4-6}"
+            log "$(msg llm.model.label "${HICLAW_DEFAULT_MODEL}")"
+            prompt_custom_model_params "${HICLAW_DEFAULT_MODEL}" || return 0
+            log ""
+            prompt HICLAW_LLM_API_KEY "$(msg llm.apikey_prompt)" "" "true" || return 0
+            test_llm_connectivity "https://api.anthropic.com/v1" "${HICLAW_LLM_API_KEY}" "${HICLAW_DEFAULT_MODEL}" || return 0
             ;;
         *)
             error "$(msg llm.provider.invalid "${PROVIDER_CHOICE}")"

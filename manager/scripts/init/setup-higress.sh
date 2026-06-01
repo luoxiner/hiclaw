@@ -171,6 +171,17 @@ if [ -n "${HICLAW_LLM_API_KEY}" ]; then
                 higress_api POST /v1/ai/providers "Creating LLM provider (qwen)" "${PROVIDER_BODY}"
             fi
             ;;
+        anthropic)
+            # Higress has built-in claude provider type that handles
+            # OpenAI -> Anthropic protocol translation automatically.
+            PROVIDER_BODY='{"type":"claude","name":"anthropic","tokens":["'"${HICLAW_LLM_API_KEY}"'"],"protocol":"openai/v1","tokenFailoverConfig":{"enabled":false},"rawConfigs":{"hiclawMode":true}}'
+            existing_provider=$(higress_get /v1/ai/providers/anthropic)
+            if [ -n "${existing_provider}" ]; then
+                higress_api PUT /v1/ai/providers/anthropic "Updating LLM provider (anthropic)" "${PROVIDER_BODY}"
+            else
+                higress_api POST /v1/ai/providers "Creating LLM provider (anthropic)" "${PROVIDER_BODY}"
+            fi
+            ;;
         openai-compat)
             OPENAI_BASE_URL="${HICLAW_OPENAI_BASE_URL:-}"
             if [ -z "${OPENAI_BASE_URL}" ]; then
