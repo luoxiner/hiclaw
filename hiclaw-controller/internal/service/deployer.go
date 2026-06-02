@@ -748,7 +748,9 @@ func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agent
 		logger.Info("AGENTS.md builtin template not found", "worker", workerName, "role", role, "runtime", runtime, "path", builtinPath)
 	}
 
-	// Priority: inline spec (user intent) > OSS (from package).
+	// Priority: inline spec (user intent) > MinIO (manager-managed or package).
+	// When inline is empty and MinIO already has AGENTS.md, treat MinIO as
+	// authoritative and skip the write — the Manager container owns the file.
 	// Read inline directly from memory to avoid local file race with background mc mirror.
 	var content string
 	source := "oss"
@@ -759,14 +761,15 @@ func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agent
 		existing, err := d.oss.GetObject(ctx, agentPrefix+"/AGENTS.md")
 		if err != nil {
 			if os.IsNotExist(err) {
-				logger.Info("AGENTS.md package/OSS source not found", "worker", workerName, "key", agentPrefix+"/AGENTS.md")
+				logger.Info("AGENTS.md not found in spec or storage", "worker", workerName, "key", agentPrefix+"/AGENTS.md")
 			} else {
-				logger.Error(err, "AGENTS.md package/OSS source read failed; continuing with empty content", "worker", workerName, "key", agentPrefix+"/AGENTS.md")
+				logger.Error(err, "AGENTS.md storage read failed; continuing with empty content", "worker", workerName, "key", agentPrefix+"/AGENTS.md")
 			}
-		} else {
-			logger.Info("AGENTS.md package/OSS source loaded", "worker", workerName, "key", agentPrefix+"/AGENTS.md", "bytes", len(existing), "hasBuiltinMarkers", strings.Contains(string(existing), "<!-- hiclaw-builtin-start -->"))
+		} else if len(existing) > 0 {
+			// MinIO has content and spec is empty → MinIO wins, do not overwrite.
+			logger.Info("AGENTS.md: spec empty, keeping existing version in storage", "worker", workerName, "key", agentPrefix+"/AGENTS.md", "bytes", len(existing))
+			return nil
 		}
-		content = string(existing)
 	}
 	logger.Info("AGENTS.md source selected", "worker", workerName, "source", source, "bytes", len(content), "hasBuiltinMarkers", strings.Contains(content, "<!-- hiclaw-builtin-start -->"))
 	if len(builtinContent) > 0 {

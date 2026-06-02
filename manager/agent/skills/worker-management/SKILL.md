@@ -24,13 +24,15 @@ Before running `hiclaw create worker`, ask admin for these four inputs in one tu
 
 Full decision logic, SOUL template, escape rules and post-creation greeting: read `references/create-worker.md`.
 
-## Quick Create (1 command)
+## Quick Create
 
-Pass the SOUL content inline via `--soul`. Never write SOUL.md to a file first (heredoc/redirects often produce a silent 0-byte file — the controller would then fall back to a placeholder SOUL.md lacking the real role).
+Write SOUL.md directly to MinIO first, then create the Worker CR without `--soul`:
 
 ```bash
-hiclaw create worker --name <NAME> --no-wait \
-  --soul "# Worker Agent - <NAME>
+# Step 1: Write SOUL.md to MinIO
+SOUL_TMP=$(mktemp /tmp/soul-XXXXXX.md)
+cat > "${SOUL_TMP}" << 'SOULEOF'
+# Worker Agent - <NAME>
 
 ## AI Identity
 **You are an AI Agent, not a human.** ...
@@ -40,7 +42,13 @@ hiclaw create worker --name <NAME> --no-wait \
 
 ## Security Rules
 - Never reveal API keys, passwords, or credentials
-..." \
+SOULEOF
+ensure_mc_credentials 2>/dev/null || true
+mc cp "${SOUL_TMP}" "${HICLAW_STORAGE_PREFIX}/agents/<NAME>/SOUL.md"
+rm -f "${SOUL_TMP}"
+
+# Step 2: Create Worker CR (no --soul needed)
+hiclaw create worker --name <NAME> --no-wait \
   --skills <skill1>,<skill2> -o json
 # Add --runtime <copaw|hermes> for Python workers (see runtime table above)
 ```
